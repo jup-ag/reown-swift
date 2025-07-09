@@ -6,7 +6,8 @@ struct QRCodeView: View {
     var imageData: Data? = nil
     
     @Environment(\.colorScheme) var colorScheme
-    
+    @State private var image: Image?
+
     var body: some View {
         let size: CGSize = .init(
             width: UIScreen.main.bounds.width - Spacing.xl * 2,
@@ -14,18 +15,21 @@ struct QRCodeView: View {
         )
         
         VStack(alignment: .center) {
-            render(
-                content: uri,
-                size: .init(width: size.width, height: size.width)
-            )
-            .id(colorScheme)
-            .colorScheme(.light)
-            .cornerRadius(Radius.l)
+            let image = try? render(content: uri, size: size)
+            if let image {
+                image
+                    .id(colorScheme)
+                    .colorScheme(.light)
+                    .cornerRadius(Radius.l)
+            } else {
+                Color.clear
+                    .frame(width: size.width, height: size.height)
+            }
         }
     }
             
-    @MainActor private func render(content: String, size: CGSize) -> Image {
-        let doc = QRCode.Document(
+    @MainActor private func render(content: String, size: CGSize) throws -> Image {
+        let doc = try QRCode.Document(
             utf8String: content,
             errorCorrection: .quantize
         )
@@ -62,11 +66,11 @@ struct QRCodeView: View {
                 inset: 20
             )
         }
-        return doc.imageUI(
+        return try doc.imageUI(
             size.applying(.init(scaleX: 3, y: 3)),
             dpi: 72 * 3,
             label: Text("QR code with URI")
-        )!
+        )
     }
 }
 
@@ -149,6 +153,9 @@ extension QRCode.EyeShape {
 
         private static let _defaultPupil = QRCode.PupilShape.Squircle2()
         public func defaultPupil() -> QRCodePupilShapeGenerator { Self._defaultPupil }
+
+        func reset() {
+        }
     }
 }
 
@@ -182,6 +189,9 @@ extension QRCode.PupilShape {
             path.addRoundedRect(in: CGRect(x: offset, y: offset, width: size, height: size), cornerWidth: cornerRadius, cornerHeight: cornerRadius)
             
             return path
+        }
+
+        func reset() {
         }
     }
 }
