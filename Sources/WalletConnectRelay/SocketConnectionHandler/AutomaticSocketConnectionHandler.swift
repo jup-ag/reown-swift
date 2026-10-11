@@ -36,8 +36,8 @@ class AutomaticSocketConnectionHandler {
     // MARK: - Queues
 
     let syncQueue = DispatchQueue(label: "com.walletconnect.sdk.automatic_socket_connection.sync", qos: .utility)
-    /// `publishers` is inserted from init and from `handleInternalConnect`, which can overlap
-    /// once a connection status event clears `isConnecting`. Concurrent `Set.insert` double-frees.
+    /// Guards `publishers` so `retainPublisher` is safe from any thread (concurrent `Set.insert` double-frees).
+    /// Per-call subscriptions in `handleInternalConnect` are held locally, not stored here.
     private let publishersLock = NSLock()
     private var publishers = Set<AnyCancellable>()
 
@@ -52,12 +52,6 @@ class AutomaticSocketConnectionHandler {
         publishersLock.lock()
         defer { publishersLock.unlock() }
         return publishers.count
-    }
-
-    deinit {
-        publishersLock.lock()
-        publishers.removeAll()
-        publishersLock.unlock()
     }
 
     // MARK: - Initialization
@@ -324,11 +318,6 @@ extension AutomaticSocketConnectionHandler: SocketConnectionHandler {
             return
         }
 
-        // Proceed to start the connection
-        logger.debug("Starting connection process.")
-        logger.debug("Socket request: \(socket.request.debugDescription)")
-        connectSocketWithFreshToken()
-
         // Use Combine publisher to monitor connection status
         let connectionStatusPublisher = socketStatusProvider.socketConnectionStatusPublisher
             .share()
@@ -336,19 +325,28 @@ extension AutomaticSocketConnectionHandler: SocketConnectionHandler {
 
         let connection = connectionStatusPublisher.connect()
 
-        // Ensure connection is canceled when done
+        // Held locally for the duration of this call only, so per-call subscriptions
+        // never accumulate in the shared `publishers` set.
+        var cancellable: AnyCancellable?
+
+        // Ensure connection and subscription are canceled when done
         defer {
             logger.debug("Cancelling connection status publisher.")
+            cancellable?.cancel()
             connection.cancel()
         }
 
+        // Serial queue so value and timeout-completion callbacks never run concurrently
+        // and race on `isResumed` / `attempts`. `timeout`'s scheduler only hops the timeout
+        // itself; values still arrive on the upstream thread unless `receive(on:)` follows.
+        let eventQueue = DispatchQueue(label: "com.walletconnect.sdk.automatic_socket_connection.internal_connect")
+
         // Use a Combine publisher to monitor disconnection and timeout
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            var cancellable: AnyCancellable?
-
             cancellable = connectionStatusPublisher
                 .setFailureType(to: NetworkError.self)
-                .timeout(.seconds(requestTimeout), scheduler: DispatchQueue.global(), customError: { NetworkError.connectionFailed })
+                .timeout(.seconds(requestTimeout), scheduler: eventQueue, customError: { NetworkError.connectionFailed })
+                .receive(on: eventQueue)
                 .sink(receiveCompletion: { [weak self] completion in
                     guard let self = self else { return }
                     guard !isResumed else { return } // Ensure continuation is only resumed once
@@ -390,8 +388,10 @@ extension AutomaticSocketConnectionHandler: SocketConnectionHandler {
                     }
                 })
 
-            // Store cancellable to keep it alive. This insert overlaps the setup subscriptions.
-            retainPublisher(cancellable)
+            // Start the connection only after subscribing so a fast `.connected` event is not missed.
+            self.logger.debug("Starting connection process.")
+            self.logger.debug("Socket request: \(self.socket.request.debugDescription)")
+            self.connectSocketWithFreshToken()
         }
     }
 
