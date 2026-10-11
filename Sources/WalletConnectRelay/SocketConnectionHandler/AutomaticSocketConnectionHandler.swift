@@ -36,7 +36,29 @@ class AutomaticSocketConnectionHandler {
     // MARK: - Queues
 
     let syncQueue = DispatchQueue(label: "com.walletconnect.sdk.automatic_socket_connection.sync", qos: .utility)
+    /// `publishers` is inserted from init and from `handleInternalConnect`, which can overlap
+    /// once a connection status event clears `isConnecting`. Concurrent `Set.insert` double-frees.
+    private let publishersLock = NSLock()
     private var publishers = Set<AnyCancellable>()
+
+    func retainPublisher(_ cancellable: AnyCancellable?) {
+        guard let cancellable else { return }
+        publishersLock.lock()
+        publishers.insert(cancellable)
+        publishersLock.unlock()
+    }
+
+    var retainedPublisherCount: Int {
+        publishersLock.lock()
+        defer { publishersLock.unlock() }
+        return publishers.count
+    }
+
+    deinit {
+        publishersLock.lock()
+        publishers.removeAll()
+        publishersLock.unlock()
+    }
 
     // MARK: - Initialization
 
@@ -114,32 +136,33 @@ class AutomaticSocketConnectionHandler {
 
     private func setUpSocketStatusObserving() {
         logger.debug("Setting up socket status observing.")
-        socketStatusProvider.socketConnectionStatusPublisher
-            .sink { [weak self] status in
-                guard let self = self else { return }
-                self.syncQueue.async { [weak self] in
+        retainPublisher(
+            socketStatusProvider.socketConnectionStatusPublisher
+                .sink { [weak self] status in
                     guard let self = self else { return }
-                    switch status {
-                    case .connected:
-                        self.logger.debug("Socket connected.")
-                        self.isConnecting = false
-                        self.reconnectionAttempts = 0 // Reset reconnection attempts on successful connection
-                        self.stopPeriodicReconnectionTimer()
-                    case .disconnected:
-                        self.logger.debug("Socket disconnected.")
-                        if self.isConnecting {
-                            self.logger.debug("Was in connecting state when disconnected.")
-                            self.handleFailedConnectionAndReconnectIfNeeded()
-                        } else {
-                            Task(priority: .high) { [weak self] in
-                                await self?.handleDisconnection()
+                    self.syncQueue.async { [weak self] in
+                        guard let self = self else { return }
+                        switch status {
+                        case .connected:
+                            self.logger.debug("Socket connected.")
+                            self.isConnecting = false
+                            self.reconnectionAttempts = 0 // Reset reconnection attempts on successful connection
+                            self.stopPeriodicReconnectionTimer()
+                        case .disconnected:
+                            self.logger.debug("Socket disconnected.")
+                            if self.isConnecting {
+                                self.logger.debug("Was in connecting state when disconnected.")
+                                self.handleFailedConnectionAndReconnectIfNeeded()
+                            } else {
+                                Task(priority: .high) { [weak self] in
+                                    await self?.handleDisconnection()
+                                }
                             }
+                            self.isConnecting = false // Ensure isConnecting is reset
                         }
-                        self.isConnecting = false // Ensure isConnecting is reset
                     }
                 }
-            }
-            .store(in: &publishers)
+        )
     }
 
     private func handleFailedConnectionAndReconnectIfNeeded() {
@@ -214,15 +237,16 @@ class AutomaticSocketConnectionHandler {
 
     private func setUpNetworkMonitoring() {
         logger.debug("Setting up network monitoring.")
-        networkMonitor.networkConnectionStatusPublisher
-            .sink { [weak self] networkConnectionStatus in
-                guard let self = self else { return }
-                if networkConnectionStatus == .connected {
-                    self.logger.debug("Network connected. Reconnecting if needed.")
-                    self.reconnectIfNeeded()
+        retainPublisher(
+            networkMonitor.networkConnectionStatusPublisher
+                .sink { [weak self] networkConnectionStatus in
+                    guard let self = self else { return }
+                    if networkConnectionStatus == .connected {
+                        self.logger.debug("Network connected. Reconnecting if needed.")
+                        self.reconnectIfNeeded()
+                    }
                 }
-            }
-            .store(in: &publishers)
+        )
     }
 
     // MARK: - Background Task Handling
@@ -366,8 +390,8 @@ extension AutomaticSocketConnectionHandler: SocketConnectionHandler {
                     }
                 })
 
-            // Store cancellable to keep it alive
-            self.publishers.insert(cancellable!)
+            // Store cancellable to keep it alive. This insert overlaps the setup subscriptions.
+            retainPublisher(cancellable)
         }
     }
 

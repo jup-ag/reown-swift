@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import WalletConnectRelay
@@ -389,5 +390,27 @@ final class AutomaticSocketConnectionHandlerTests: XCTestCase {
 
         // Wait for the task to complete
         await handleConnectTask.value
+    }
+
+    /// Concurrent `Set.insert` on `publishers` double-frees. Every insert has to land.
+    func testConcurrentPublisherRetainsKeepEveryInsert() {
+        let before = sut.retainedPublisherCount
+        let group = DispatchGroup()
+        let threads = 8
+        let insertsPerThread = 50
+        for _ in 0..<threads {
+            group.enter()
+            DispatchQueue.global().async {
+                for _ in 0..<insertsPerThread {
+                    let cancellable = Just(()).sink { _ in }
+                    self.sut.retainPublisher(cancellable)
+                }
+                group.leave()
+            }
+        }
+        let finished = DispatchSemaphore(value: 0)
+        group.notify(queue: .global()) { finished.signal() }
+        XCTAssertEqual(finished.wait(timeout: .now() + 2), .success)
+        XCTAssertEqual(sut.retainedPublisherCount, before + threads * insertsPerThread)
     }
 }
