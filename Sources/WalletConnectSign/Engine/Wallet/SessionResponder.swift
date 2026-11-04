@@ -29,6 +29,8 @@ class SessionResponder {
         let protocolMethod = SessionRequestProtocolMethod()
 
         guard sessionRequestNotExpired(requestId: requestId) else {
+            // Show the request queued behind this one, even if publishing the error fails.
+            defer { sessionRequestsProvider.emitRequestIfPendingAfterDelay() }
             try await networkingInteractor.respondError(
                 topic: topic,
                 requestId: requestId,

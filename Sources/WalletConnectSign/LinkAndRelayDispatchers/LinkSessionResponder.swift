@@ -44,7 +44,9 @@ class LinkSessionResponder {
 
         guard sessionRequestNotExpired(requestId: requestId) else {
             logger.debug("request expired")
-            
+            // Show the request queued behind this one, even if publishing the error fails.
+            defer { sessionRequestsProvider.emitRequestIfPendingAfterDelay() }
+
             try await linkEnvelopesDispatcher.respondError(
                 topic: topic,
                 requestId: requestId,

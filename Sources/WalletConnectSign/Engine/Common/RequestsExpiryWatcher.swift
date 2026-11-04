@@ -31,6 +31,16 @@ class RequestsExpiryWatcher {
         }
     }
 
+    deinit {
+        // A timer is invalidated on the thread that installed it, the main thread here.
+        let timer = checkTimer
+        if Thread.isMainThread {
+            timer?.invalidate()
+        } else {
+            DispatchQueue.main.async { timer?.invalidate() }
+        }
+    }
+
     func setUpExpiryCheckTimer() {
         checkTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
             self?.checkForRequestExpiry()
@@ -39,10 +49,16 @@ class RequestsExpiryWatcher {
 
     func checkForRequestExpiry() {
         let requests = historyService.getPendingExpirableRequestsWithId()
+        var deletedAny = false
         requests.forEach { (request: Expirable, recordId: RPCID) in
             guard request.isExpired() else { return }
             requestExpirationPublisherSubject.send(recordId)
             rpcHistory.delete(id: recordId)
+            deletedAny = true
+        }
+        // Otherwise the request queued behind an expired one is emitted only when another arrives.
+        if deletedAny {
+            sessionRequestsProvider.emitRequestIfPendingAfterExpiry()
         }
     }
 
