@@ -44,7 +44,9 @@ class LinkSessionResponder {
 
         guard sessionRequestNotExpired(requestId: requestId) else {
             logger.debug("request expired")
-            
+            // Show the request queued behind this one, even if publishing the error fails.
+            defer { sessionRequestsProvider.emitRequestIfPendingAfterDelay() }
+
             try await linkEnvelopesDispatcher.respondError(
                 topic: topic,
                 requestId: requestId,
@@ -66,10 +68,7 @@ class LinkSessionResponder {
         )
         Task(priority: .low) { eventsClient.saveMessageEvent(.sessionRequestLinkModeResponseSent(requestId)) }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self = self else {return}
-            sessionRequestsProvider.emitRequestIfPending()
-        }
+        sessionRequestsProvider.emitRequestIfPendingAfterDelay()
         logger.debug("will return response envelope: \(responseEnvelope)")
         return responseEnvelope
     }
