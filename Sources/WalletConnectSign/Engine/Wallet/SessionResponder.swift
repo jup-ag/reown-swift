@@ -45,10 +45,7 @@ class SessionResponder {
             protocolMethod: protocolMethod
         )
         verifyContextStore.delete(forKey: requestId.string)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
-            guard let self = self else {return}
-            sessionRequestsProvider.emitRequestIfPending()
-        }
+        sessionRequestsProvider.emitRequestIfPendingAfterDelay()
     }
 
     private func sessionRequestNotExpired(requestId: RPCID) -> Bool {

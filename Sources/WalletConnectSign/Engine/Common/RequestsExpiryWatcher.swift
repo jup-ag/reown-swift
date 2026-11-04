@@ -7,6 +7,7 @@ class RequestsExpiryWatcher {
     private let requestExpirationPublisherSubject: PassthroughSubject<RPCID, Never> = .init()
     private let rpcHistory: RPCHistory
     private let historyService: HistoryService
+    private let sessionRequestsProvider: SessionRequestsProvider
 
     var requestExpirationPublisher: AnyPublisher<RPCID, Never> {
         return requestExpirationPublisherSubject.eraseToAnyPublisher()
@@ -14,19 +15,25 @@ class RequestsExpiryWatcher {
 
     private var checkTimer: Timer?
 
+    /// `startsCheckTimer` is false only in tests, which call `checkForRequestExpiry()` themselves.
     internal init(
         proposalPayloadsStore: CodableStore<RequestSubscriptionPayload<SessionType.ProposeParams>>,
         rpcHistory: RPCHistory,
-        historyService: HistoryService
+        historyService: HistoryService,
+        sessionRequestsProvider: SessionRequestsProvider,
+        startsCheckTimer: Bool = true
     ) {
         self.rpcHistory = rpcHistory
         self.historyService = historyService
-        setUpExpiryCheckTimer()
+        self.sessionRequestsProvider = sessionRequestsProvider
+        if startsCheckTimer {
+            setUpExpiryCheckTimer()
+        }
     }
 
     func setUpExpiryCheckTimer() {
-        checkTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [unowned self] _ in
-            checkForRequestExpiry()
+        checkTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+            self?.checkForRequestExpiry()
         }
     }
 
