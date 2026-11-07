@@ -390,8 +390,14 @@ extension AutomaticSocketConnectionHandler: SocketConnectionHandler {
 
             // Start the connection only after subscribing so a fast `.connected` event is not missed.
             self.logger.debug("Starting connection process.")
-            self.logger.debug("Socket request: \(self.socket.request.debugDescription)")
-            self.connectSocketWithFreshToken()
+            // `refreshTokenIfNeeded()` rewrites `socket.request`, which `connect()` and the reconnection
+            // timer also rewrite on `syncQueue`. Calling it from this task's thread let two refreshes
+            // overlap, and the socket crashed releasing a request the other had already replaced.
+            self.syncQueue.async { [weak self] in
+                guard let self = self else { return }
+                self.logger.debug("Socket request: \(self.socket.request.debugDescription)")
+                self.connectSocketWithFreshToken()
+            }
         }
     }
 
