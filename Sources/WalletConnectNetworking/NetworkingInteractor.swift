@@ -236,15 +236,7 @@ public class NetworkingInteractor: NetworkInteracting {
     public func respond(topic: String, response: RPCResponse, protocolMethod: ProtocolMethod, envelopeType: Envelope.EnvelopeType) async throws {
         try rpcHistory.validate(response)
         let message = try serializer.serialize(topic: topic, encodable: response, envelopeType: envelopeType)
-        do {
-            try await relayClient.publish(topic: topic, payload: message, tag: protocolMethod.responseConfig.tag, prompt: protocolMethod.responseConfig.prompt, ttl: protocolMethod.responseConfig.ttl)
-        } catch RelayError.requestTimeout {
-            // The response went out and only its acknowledgement is missing, so the peer may have it.
-            // Resolve the request as answered: left pending, it would wait for a second response, and
-            // a wallet shows no request queued behind a pending one.
-            _ = try? rpcHistory.resolve(response)
-            throw RelayError.requestTimeout
-        }
+        try await relayClient.publish(topic: topic, payload: message, tag: protocolMethod.responseConfig.tag, prompt: protocolMethod.responseConfig.prompt, ttl: protocolMethod.responseConfig.ttl)
         try rpcHistory.resolve(response)
     }
 

@@ -38,6 +38,12 @@ final class HistoryService: HistoryServiceProtocol {
         }
     }
 
+    /// Deletes the record of a request the wallet answered, as `RPCHistory.resolve` does once the
+    /// relay acknowledges the answer.
+    func removeAnsweredRequest(id: RPCID) {
+        history.delete(id: id)
+    }
+
     func getPendingRequests() -> [(request: Request, context: VerifyContext?)] {
         getPendingRequestsSortedByTimestamp()
     }
