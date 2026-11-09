@@ -109,7 +109,12 @@ final class ApproveEngineTests: XCTestCase {
             do {
                 _ = try await engine.approveProposal(proposerPubKey: proposal.proposer.publicKey, validating: SessionNamespace.stubDictionary())
                 XCTFail("\(approval): the relay never acknowledges it, so it times out")
-            } catch RelayError.requestTimeout {}
+            } catch RelayError.requestTimeout {
+            } catch {
+                // Named here: thrown out of the test, this error is reported as "requestTimeout", the
+                // error the settle task threw and approveProposal discarded.
+                XCTFail("\(approval) failed with \(error), not the relay's timeout")
+            }
         }
 
         XCTAssertNotNil(history.get(recordId: RPCID("id")), "the proposal is still there to answer")

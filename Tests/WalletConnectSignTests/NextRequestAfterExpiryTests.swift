@@ -115,7 +115,10 @@ final class NextRequestAfterExpiryTests: XCTestCase {
             do {
                 try await responder.respondSessionRequest(topic: Queue.topic, requestId: RPCID(1), response: .response(AnyCodable("signature")))
                 XCTFail("\(row.label): an answer whose acknowledgement times out throws: the wallet can't tell whether the dapp has it")
-            } catch RelayError.requestTimeout {}
+            } catch RelayError.requestTimeout {
+            } catch {
+                XCTFail("\(row.label) failed with \(error), not the relay's timeout")
+            }
             queue.runScheduledEmissions(row.label)
 
             XCTAssertEqual(queue.pendingIds(), [RPCID(2)], "\(row.label): request 1 is answered, so it is no longer pending")
