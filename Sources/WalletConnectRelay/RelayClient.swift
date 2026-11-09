@@ -57,6 +57,8 @@ public final class RelayClient {
     private let subscriptionsTracker: SubscriptionsTracking
 
     private let concurrentQueue = DispatchQueue(label: "com.walletconnect.sdk.relay_client", qos: .utility, attributes: .concurrent)
+    /// How long a publish waits for the relay's acknowledgement before it throws `RelayError.requestTimeout`.
+    private let acknowledgementTimeout: DispatchTimeInterval
 
     public var logsPublisher: AnyPublisher<Log, Never> {
         logger.logsPublisher
@@ -70,13 +72,15 @@ public final class RelayClient {
         logger: ConsoleLogging,
         rpcHistory: RPCHistory,
         clientIdStorage: ClientIdStoring,
-        subscriptionsTracker: SubscriptionsTracking
+        subscriptionsTracker: SubscriptionsTracking,
+        acknowledgementTimeout: DispatchTimeInterval = .seconds(60)
     ) {
         self.logger = logger
         self.dispatcher = dispatcher
         self.rpcHistory = rpcHistory
         self.clientIdStorage = clientIdStorage
         self.subscriptionsTracker = subscriptionsTracker
+        self.acknowledgementTimeout = acknowledgementTimeout
         setUpBindings()
         setupConnectionSubscriptions()
     }
@@ -138,7 +142,7 @@ public final class RelayClient {
             cancellable = requestAcknowledgePublisher
                 .filter { $0 == request.id }
                 .setFailureType(to: RelayError.self)
-                .timeout(.seconds(60), scheduler: concurrentQueue, customError: { .requestTimeout })
+                .timeout(.init(acknowledgementTimeout), scheduler: concurrentQueue, customError: { .requestTimeout })
                 .sink(receiveCompletion: { [unowned self] result in
                     switch result {
                     case .failure(let error):

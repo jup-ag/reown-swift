@@ -3,14 +3,16 @@ import Combine
 import JSONRPC
 import WalletConnectKMS
 import WalletConnectNetworking
+@testable import WalletConnectRelay
 @testable import WalletConnectSign
 @testable import WalletConnectUtils
 @testable import TestingUtils
 
 /// A wallet is shown one session request at a time: the oldest pending one, emitted when a request
-/// arrives and a second after a request is answered. When the request on screen expires, the one
-/// queued behind it must be emitted too, or it waits until some other request arrives; and an
-/// expiry must not send the wallet the request it is already showing.
+/// arrives and a second after a request is answered. When the request on screen expires, or its
+/// answer's acknowledgement times out, the one queued behind it must be emitted too, or it waits
+/// until some other request arrives; and an expiry must not send the wallet the request it is
+/// already showing.
 ///
 /// The provider's schedule and clock are faked: a delayed emission runs by hand at the time it was
 /// due, so nothing waits on a real clock.
@@ -88,6 +90,25 @@ final class NextRequestAfterExpiryTests: XCTestCase {
         XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)])
     }
 
+    /// The relay took the answer but its acknowledgement never came, so the dapp may have it. The wallet
+    /// can't answer again, and the request queued behind it must not wait for its expiry, or for ever
+    /// when it has none.
+    func testAnAnswerWhoseAcknowledgementTimesOutShowsTheOneQueuedBehindIt() async throws {
+        let queue = try Queue([.session(1, expired: false), .session(2, expired: false)])
+        let responder = queue.makeResponder(networking: queue.makeNetworkingWhoseRelayNeverAcknowledges())
+        queue.show()
+        queue.advance(5)
+
+        do {
+            try await responder.respondSessionRequest(topic: Queue.topic, requestId: RPCID(1), response: .response(AnyCodable("signature")))
+            XCTFail("an answer whose acknowledgement times out throws: the wallet can't tell whether the dapp has it")
+        } catch RelayError.requestTimeout {}
+        queue.runScheduledEmissions("after the timed-out answer")
+
+        XCTAssertEqual(queue.pendingIds(), [RPCID(2)], "request 1 is answered, so it is no longer pending")
+        XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)])
+    }
+
     func testAnsweringAnExpiredRequestShowsTheNextEvenIfTheErrorFailsToSend() async throws {
         let queue = try Queue([.session(1, expired: false), .session(2, expired: false)])
         let responder = queue.makeResponder(networking: OfflineNetworking())
@@ -151,6 +172,54 @@ private final class OfflineNetworking: NetworkingInteractorMock {
     override func respondError(topic: String, requestId: RPCID, protocolMethod: ProtocolMethod, reason: Reason, envelopeType: Envelope.EnvelopeType) async throws {
         throw PublishFailed()
     }
+}
+
+/// A relay socket that takes every message and acknowledges none, as when the acknowledgement is lost.
+private final class SocketWithoutAcknowledgements: Dispatching {
+    var onMessage: ((String) -> Void)?
+    var isSocketConnected: Bool { true }
+    var networkConnectionStatusPublisher: AnyPublisher<NetworkConnectionStatus, Never> {
+        Just(.connected).eraseToAnyPublisher()
+    }
+    var socketConnectionStatusPublisher: AnyPublisher<SocketConnectionStatus, Never> {
+        Empty(completeImmediately: false).eraseToAnyPublisher()
+    }
+
+    func protectedSend(_ string: String, completion: @escaping (Error?) -> Void) {
+        completion(nil)
+    }
+
+    func protectedSend(_ string: String) async throws {}
+
+    func connect() throws {}
+
+    func disconnect(closeCode: URLSessionWebSocketTask.CloseCode) throws {}
+}
+
+/// Sends every message as is: what goes over the socket is not under test.
+private struct PlainSerializer: Serializing {
+    struct NotADecoder: Error {}
+
+    var logsPublisher: AnyPublisher<Log, Never> { Empty().eraseToAnyPublisher() }
+    var logger: ConsoleLogging { ConsoleLoggerMock() }
+
+    func setLogging(level: LoggingLevel) {}
+
+    func serialize(topic: String?, encodable: Encodable, envelopeType: Envelope.EnvelopeType, codingType: Envelope.CodingType) throws -> String {
+        "envelope"
+    }
+
+    func deserialize<T: Codable>(topic: String, codingType: Envelope.CodingType, envelopeString: String) throws -> (T, derivedTopic: String?, decryptedPayload: Data) {
+        throw NotADecoder()
+    }
+}
+
+/// Publishing never asks for the client id.
+private struct NoClientId: ClientIdStoring {
+    struct NotStored: Error {}
+
+    func getOrCreateKeyPair() throws -> SigningPrivateKey { throw NotStored() }
+    func getClientId() throws -> String { throw NotStored() }
 }
 
 /// One pending-request queue: an in-memory `RPCHistory`, its `HistoryService`, and a
@@ -245,7 +314,26 @@ private final class Queue {
         )
     }
 
-    func makeResponder(networking: NetworkingInteractorMock) -> SessionResponder {
+    /// The real networking and relay client on this queue's history, over a socket that never
+    /// acknowledges, so every publish times out: after a millisecond here, 60 s in an app.
+    func makeNetworkingWhoseRelayNeverAcknowledges() -> NetworkingInteractor {
+        let relayClient = RelayClient(
+            dispatcher: SocketWithoutAcknowledgements(),
+            logger: ConsoleLoggerMock(),
+            rpcHistory: RPCHistoryFactory.createForRelay(keyValueStorage: RuntimeKeyValueStorage()),
+            clientIdStorage: NoClientId(),
+            subscriptionsTracker: SubscriptionsTrackerMock(),
+            acknowledgementTimeout: .milliseconds(1)
+        )
+        return NetworkingInteractor(
+            relayClient: relayClient,
+            serializer: PlainSerializer(),
+            logger: ConsoleLoggerMock(),
+            rpcHistory: rpcHistory
+        )
+    }
+
+    func makeResponder(networking: NetworkInteracting) -> SessionResponder {
         let sessions = WCSessionStorageMock()
         sessions.setSession(WCSession.stub(topic: Self.topic, namespaces: SessionNamespace.stubDictionary()))
         return SessionResponder(
