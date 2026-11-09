@@ -1,9 +1,10 @@
 import Foundation
 
-enum RelayError: Error, LocalizedError {
+public enum RelayError: Error, LocalizedError {
+    /// The relay did not acknowledge a publish in time. The message went out, so its peer may have it.
     case requestTimeout
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         return localizedDescription
     }
 

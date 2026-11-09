@@ -19,6 +19,9 @@ class DispatcherMock: Dispatching {
     var sent = false
     var lastMessage: String = ""
     var onMessage: ((String) -> Void)?
+    /// Whether `send` acknowledges a request at once, before it returns.
+    var acknowledgesInSend = true
+    var onSend: ((String) -> Void)?
 
     func protectedSend(_ string: String, completion: @escaping (Error?) -> Void) {
         send(string, completion: completion)
@@ -39,6 +42,8 @@ class DispatcherMock: Dispatching {
     func send(_ string: String, completion: @escaping (Error?) -> Void) {
         sent = true
         lastMessage = string
+        onSend?(string)
+        guard acknowledgesInSend else { return }
 
         usleep(20)
         if let data = string.data(using: .utf8),

@@ -2,6 +2,7 @@ import XCTest
 import Combine
 import JSONRPC
 import WalletConnectNetworking
+import WalletConnectRelay
 @testable import WalletConnectPairing
 @testable import WalletConnectSign
 @testable import TestingUtils
@@ -39,8 +40,12 @@ final class ApproveEngineTests: XCTestCase {
                 identifier: ""
             )
         )
-        engine = ApproveEngine(
-            networkingInteractor: networkingInteractor,
+        engine = makeEngine(networking: networkingInteractor, history: history)
+    }
+
+    private func makeEngine(networking: NetworkInteracting, history: RPCHistory) -> ApproveEngine {
+        ApproveEngine(
+            networkingInteractor: networking,
             proposalPayloadsStore: proposalPayloadsStore,
             verifyContextStore: verifyContextStore,
             sessionTopicToProposal: sessionTopicToProposal,
@@ -85,21 +90,52 @@ final class ApproveEngineTests: XCTestCase {
         XCTAssertTrue(sessionStorageMock.hasSession(forTopic: topicB), "Responder must persist session on topic B")
     }
 
+    /// The relay took an approval but never acknowledged it, so the wallet can't tell whether the dapp
+    /// has it, and a wallet's proposal sheet offers Approve again after the failure. Unlike session
+    /// requests, proposals don't queue behind one another, so the timeout leaves the proposal's record
+    /// for the next answer: the second approval goes out too, rather than failing as an answer to a
+    /// request Reown no longer holds.
+    func testAProposalWhoseApprovalTimesOutCanBeApprovedAgain() async throws {
+        let history = RPCHistory(keyValueStore: .init(defaults: RuntimeKeyValueStorage(), identifier: ""))
+        engine = makeEngine(networking: networkingWhoseRelayNeverAcknowledges(history: history), history: history)
+        let topicA = String.generateTopic()
+        pairingStorageMock.setPairing(WCPairing.stub(expiryDate: Date(timeIntervalSinceNow: 10000), topic: topicA))
+        let proposal = SessionProposal.stub(proposerPubKey: AgreementPrivateKey().publicKey.hexRepresentation)
+        // The relay client records a proposal as it arrives, before the engine sees it.
+        try history.set(RPCRequest(method: "wc_sessionPropose", params: proposal, rpcid: RPCID("id")), forTopic: topicA, emmitedBy: .remote, transportType: .relay)
+        pairingRegisterer.subject.send(RequestSubscriptionPayload(id: RPCID("id"), topic: topicA, request: proposal, decryptedPayload: Data(), publishedAt: Date(), derivedTopic: nil, encryptedMessage: "", attestation: nil))
+
+        for approval in ["the first approval", "the second approval"] {
+            do {
+                _ = try await engine.approveProposal(proposerPubKey: proposal.proposer.publicKey, validating: SessionNamespace.stubDictionary())
+                XCTFail("\(approval): the relay never acknowledges it, so it times out")
+            } catch RelayError.requestTimeout {
+            } catch {
+                // Named here: thrown out of the test, this error is reported as "requestTimeout", the
+                // error the settle task threw and approveProposal discarded.
+                XCTFail("\(approval) failed with \(error), not the relay's timeout")
+            }
+        }
+
+        XCTAssertNotNil(history.get(recordId: RPCID("id")), "the proposal is still there to answer")
+    }
+
     func testReceiveProposal() {
         let pairing = WCPairing.stub()
         let topicA = pairing.topic
         pairingStorageMock.setPairing(pairing)
-        var sessionProposed = false
         let proposerPubKey = AgreementPrivateKey().publicKey.hexRepresentation
         let proposal = SessionProposal.stub(proposerPubKey: proposerPubKey)
-
+        // With no verify context stored yet, the engine reports the proposal from a task, once the
+        // origin is verified, so the test waits for it rather than reading a flag right away.
+        let proposed = expectation(description: "the engine reports the proposal")
         engine.onSessionProposal = { _, _ in
-            sessionProposed = true
+            proposed.fulfill()
         }
 
         pairingRegisterer.subject.send(RequestSubscriptionPayload(id: RPCID("id"), topic: topicA, request: proposal, decryptedPayload: Data(), publishedAt: Date(), derivedTopic: nil, encryptedMessage: "", attestation: nil))
         XCTAssertNotNil(try! proposalPayloadsStore.get(key: proposal.proposer.publicKey), "Proposer must store proposal payload")
-        XCTAssertTrue(sessionProposed)
+        wait(for: [proposed], timeout: 5)
     }
 
     func testSessionSettle() async throws {

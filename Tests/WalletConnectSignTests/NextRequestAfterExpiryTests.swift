@@ -3,14 +3,16 @@ import Combine
 import JSONRPC
 import WalletConnectKMS
 import WalletConnectNetworking
+@testable import WalletConnectRelay
 @testable import WalletConnectSign
 @testable import WalletConnectUtils
 @testable import TestingUtils
 
 /// A wallet is shown one session request at a time: the oldest pending one, emitted when a request
-/// arrives and a second after a request is answered. When the request on screen expires, the one
-/// queued behind it must be emitted too, or it waits until some other request arrives; and an
-/// expiry must not send the wallet the request it is already showing.
+/// arrives and a second after a request is answered. When the request on screen expires, or its
+/// answer's acknowledgement times out, the one queued behind it must be emitted too, or it waits
+/// until some other request arrives; and an expiry must not send the wallet the request it is
+/// already showing.
 ///
 /// The provider's schedule and clock are faked: a delayed emission runs by hand at the time it was
 /// due, so nothing waits on a real clock.
@@ -86,6 +88,42 @@ final class NextRequestAfterExpiryTests: XCTestCase {
         queue.runScheduledEmissions("after the answer")
 
         XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)])
+    }
+
+    /// The relay took the answer but its acknowledgement never came, so the dapp may have it. The wallet
+    /// can't answer again, and the request queued behind it must not wait for its expiry, or for ever
+    /// when it has none. The same goes for the expired error Reown sends in place of an answer to a
+    /// request that expired on screen.
+    func testAnAnswerWhoseAcknowledgementTimesOutShowsTheOneQueuedBehindIt() async throws {
+        struct Row {
+            let label: String
+            let expiresWhileShown: Bool
+        }
+        let rows = [
+            Row(label: "the answer to request 1", expiresWhileShown: false),
+            Row(label: "the expired error for request 1", expiresWhileShown: true)
+        ]
+        for row in rows {
+            let queue = try Queue([.session(1, expired: false), .session(2, expired: false)])
+            let responder = queue.makeResponder(networking: queue.makeNetworkingWhoseRelayNeverAcknowledges())
+            queue.show()
+            if row.expiresWhileShown {
+                try queue.expire(1)
+            }
+            queue.advance(5)
+
+            do {
+                try await responder.respondSessionRequest(topic: Queue.topic, requestId: RPCID(1), response: .response(AnyCodable("signature")))
+                XCTFail("\(row.label): an answer whose acknowledgement times out throws: the wallet can't tell whether the dapp has it")
+            } catch RelayError.requestTimeout {
+            } catch {
+                XCTFail("\(row.label) failed with \(error), not the relay's timeout")
+            }
+            queue.runScheduledEmissions(row.label)
+
+            XCTAssertEqual(queue.pendingIds(), [RPCID(2)], "\(row.label): request 1 is answered, so it is no longer pending")
+            XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)], row.label)
+        }
     }
 
     func testAnsweringAnExpiredRequestShowsTheNextEvenIfTheErrorFailsToSend() async throws {
@@ -245,7 +283,13 @@ private final class Queue {
         )
     }
 
-    func makeResponder(networking: NetworkingInteractorMock) -> SessionResponder {
+    /// The real networking and relay client on this queue's history, over a socket that never
+    /// acknowledges, so every publish times out.
+    func makeNetworkingWhoseRelayNeverAcknowledges() -> NetworkingInteractor {
+        networkingWhoseRelayNeverAcknowledges(history: rpcHistory)
+    }
+
+    func makeResponder(networking: NetworkInteracting) -> SessionResponder {
         let sessions = WCSessionStorageMock()
         sessions.setSession(WCSession.stub(topic: Self.topic, namespaces: SessionNamespace.stubDictionary()))
         return SessionResponder(

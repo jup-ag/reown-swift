@@ -57,6 +57,8 @@ public final class RelayClient {
     private let subscriptionsTracker: SubscriptionsTracking
 
     private let concurrentQueue = DispatchQueue(label: "com.walletconnect.sdk.relay_client", qos: .utility, attributes: .concurrent)
+    /// How long a publish waits for the relay's acknowledgement before it throws `RelayError.requestTimeout`.
+    private let acknowledgementTimeout: DispatchTimeInterval
 
     public var logsPublisher: AnyPublisher<Log, Never> {
         logger.logsPublisher
@@ -70,13 +72,15 @@ public final class RelayClient {
         logger: ConsoleLogging,
         rpcHistory: RPCHistory,
         clientIdStorage: ClientIdStoring,
-        subscriptionsTracker: SubscriptionsTracking
+        subscriptionsTracker: SubscriptionsTracking,
+        acknowledgementTimeout: DispatchTimeInterval = .seconds(60)
     ) {
         self.logger = logger
         self.dispatcher = dispatcher
         self.rpcHistory = rpcHistory
         self.clientIdStorage = clientIdStorage
         self.subscriptionsTracker = subscriptionsTracker
+        self.acknowledgementTimeout = acknowledgementTimeout
         setUpBindings()
         setupConnectionSubscriptions()
     }
@@ -131,28 +135,24 @@ public final class RelayClient {
         
         logger.debug("[Publish] Sending payload on topic: \(topic)")
 
+        // Listen for the acknowledgement before the message goes out: the relay can acknowledge it
+        // before protectedSend returns, and requestAcknowledgePublisher drops what nobody listens for,
+        // so an acknowledgement that came first ended in requestTimeout.
+        let acknowledgement = PublishAcknowledgement()
+        let acknowledgementListener = requestAcknowledgePublisher
+            .filter { $0 == request.id }
+            .sink { _ in acknowledgement.acknowledge() }
+        defer { acknowledgementListener.cancel() }
+
         try await dispatcher.protectedSend(message)
 
-        return try await withUnsafeThrowingContinuation { continuation in
-            var cancellable: AnyCancellable?
-            cancellable = requestAcknowledgePublisher
-                .filter { $0 == request.id }
-                .setFailureType(to: RelayError.self)
-                .timeout(.seconds(60), scheduler: concurrentQueue, customError: { .requestTimeout })
-                .sink(receiveCompletion: { [unowned self] result in
-                    switch result {
-                    case .failure(let error):
-                        cancellable?.cancel()
-                        logger.debug("[Publish] Relay request timeout for topic: \(topic)")
-                        continuation.resume(throwing: error)
-                    case .finished: break
-                    }
-                }, receiveValue: { [unowned self] _ in
-                    cancellable?.cancel()
-                    logger.debug("[Publish] Published payload on topic: \(topic)")
-                    continuation.resume(returning: ())
-                })
+        do {
+            try await acknowledgement.wait(timeout: acknowledgementTimeout, on: concurrentQueue)
+        } catch {
+            logger.debug("[Publish] Relay request timeout for topic: \(topic)")
+            throw error
         }
+        logger.debug("[Publish] Published payload on topic: \(topic)")
     }
 
     public func subscribe(topic: String) async throws {

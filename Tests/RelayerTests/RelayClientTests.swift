@@ -86,4 +86,37 @@ final class RelayClientTests: XCTestCase {
         sut.unsubscribe(topic: topic) {_ in }
         XCTAssertTrue(dispatcher.sent)
     }
+
+    /// The relay can acknowledge a publish before `protectedSend` returns: `DispatcherMock` acknowledges
+    /// inside the send. An acknowledgement nobody listens for yet is dropped, and the publish then throws
+    /// `requestTimeout` once the 60 s are up, although the relay took the message.
+    func testAPublishTheRelayAcknowledgesBeforeItsSendReturnsSucceeds() async {
+        do {
+            try await sut.publish(topic: "topic", payload: "answer", tag: 1109, prompt: false, ttl: 300)
+        } catch {
+            XCTFail("the relay acknowledged the publish, but it threw \(error)")
+        }
+        XCTAssertTrue(dispatcher.sent)
+    }
+
+    /// The usual order: the relay acknowledges once the send has returned.
+    func testAPublishTheRelayAcknowledgesAfterItsSendReturnsSucceeds() async throws {
+        dispatcher.acknowledgesInSend = false
+        var sentMessages: AsyncStream<String>.Continuation?
+        let sent = AsyncStream<String> { sentMessages = $0 }
+        dispatcher.onSend = { sentMessages?.yield($0) }
+
+        let publishing = Task { try await self.sut.publish(topic: "topic", payload: "answer", tag: 1109, prompt: false, ttl: 300) }
+        var messages = sent.makeAsyncIterator()
+        let next = await messages.next()
+        let message = try XCTUnwrap(next)
+        let request = try JSONDecoder().decode(RPCRequest.self, from: Data(message.utf8))
+        dispatcher.onMessage?(try RPCResponse(matchingRequest: request, result: AnyCodable(true)).asJSONEncodedString())
+
+        do {
+            try await publishing.value
+        } catch {
+            XCTFail("the relay acknowledged the publish, but it threw \(error)")
+        }
+    }
 }
