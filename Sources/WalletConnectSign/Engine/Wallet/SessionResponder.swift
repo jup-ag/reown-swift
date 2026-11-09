@@ -41,11 +41,19 @@ class SessionResponder {
             throw Errors.sessionRequestExpired
         }
 
-        try await networkingInteractor.respond(
-            topic: topic,
-            response: RPCResponse(id: requestId, outcome: response),
-            protocolMethod: protocolMethod
-        )
+        do {
+            try await networkingInteractor.respond(
+                topic: topic,
+                response: RPCResponse(id: requestId, outcome: response),
+                protocolMethod: protocolMethod
+            )
+        } catch RelayError.requestTimeout {
+            // The answer went out but its acknowledgement timed out, and respond resolved the request:
+            // show the request queued behind it, as after an acknowledged answer, then report the timeout.
+            verifyContextStore.delete(forKey: requestId.string)
+            sessionRequestsProvider.emitRequestIfPendingAfterDelay()
+            throw RelayError.requestTimeout
+        }
         verifyContextStore.delete(forKey: requestId.string)
         sessionRequestsProvider.emitRequestIfPendingAfterDelay()
     }

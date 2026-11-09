@@ -135,28 +135,24 @@ public final class RelayClient {
         
         logger.debug("[Publish] Sending payload on topic: \(topic)")
 
+        // Listen for the acknowledgement before the message goes out: the relay can acknowledge it
+        // before protectedSend returns, and requestAcknowledgePublisher drops what nobody listens for,
+        // so an acknowledgement that came first ended in requestTimeout.
+        let acknowledgement = PublishAcknowledgement()
+        let acknowledgementListener = requestAcknowledgePublisher
+            .filter { $0 == request.id }
+            .sink { _ in acknowledgement.acknowledge() }
+        defer { acknowledgementListener.cancel() }
+
         try await dispatcher.protectedSend(message)
 
-        return try await withUnsafeThrowingContinuation { continuation in
-            var cancellable: AnyCancellable?
-            cancellable = requestAcknowledgePublisher
-                .filter { $0 == request.id }
-                .setFailureType(to: RelayError.self)
-                .timeout(.init(acknowledgementTimeout), scheduler: concurrentQueue, customError: { .requestTimeout })
-                .sink(receiveCompletion: { [unowned self] result in
-                    switch result {
-                    case .failure(let error):
-                        cancellable?.cancel()
-                        logger.debug("[Publish] Relay request timeout for topic: \(topic)")
-                        continuation.resume(throwing: error)
-                    case .finished: break
-                    }
-                }, receiveValue: { [unowned self] _ in
-                    cancellable?.cancel()
-                    logger.debug("[Publish] Published payload on topic: \(topic)")
-                    continuation.resume(returning: ())
-                })
+        do {
+            try await acknowledgement.wait(timeout: acknowledgementTimeout, on: concurrentQueue)
+        } catch {
+            logger.debug("[Publish] Relay request timeout for topic: \(topic)")
+            throw error
         }
+        logger.debug("[Publish] Published payload on topic: \(topic)")
     }
 
     public func subscribe(topic: String) async throws {
