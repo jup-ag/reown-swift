@@ -92,21 +92,35 @@ final class NextRequestAfterExpiryTests: XCTestCase {
 
     /// The relay took the answer but its acknowledgement never came, so the dapp may have it. The wallet
     /// can't answer again, and the request queued behind it must not wait for its expiry, or for ever
-    /// when it has none.
+    /// when it has none. The same goes for the expired error Reown sends in place of an answer to a
+    /// request that expired on screen.
     func testAnAnswerWhoseAcknowledgementTimesOutShowsTheOneQueuedBehindIt() async throws {
-        let queue = try Queue([.session(1, expired: false), .session(2, expired: false)])
-        let responder = queue.makeResponder(networking: queue.makeNetworkingWhoseRelayNeverAcknowledges())
-        queue.show()
-        queue.advance(5)
+        struct Row {
+            let label: String
+            let expiresWhileShown: Bool
+        }
+        let rows = [
+            Row(label: "the answer to request 1", expiresWhileShown: false),
+            Row(label: "the expired error for request 1", expiresWhileShown: true)
+        ]
+        for row in rows {
+            let queue = try Queue([.session(1, expired: false), .session(2, expired: false)])
+            let responder = queue.makeResponder(networking: queue.makeNetworkingWhoseRelayNeverAcknowledges())
+            queue.show()
+            if row.expiresWhileShown {
+                try queue.expire(1)
+            }
+            queue.advance(5)
 
-        do {
-            try await responder.respondSessionRequest(topic: Queue.topic, requestId: RPCID(1), response: .response(AnyCodable("signature")))
-            XCTFail("an answer whose acknowledgement times out throws: the wallet can't tell whether the dapp has it")
-        } catch RelayError.requestTimeout {}
-        queue.runScheduledEmissions("after the timed-out answer")
+            do {
+                try await responder.respondSessionRequest(topic: Queue.topic, requestId: RPCID(1), response: .response(AnyCodable("signature")))
+                XCTFail("\(row.label): an answer whose acknowledgement times out throws: the wallet can't tell whether the dapp has it")
+            } catch RelayError.requestTimeout {}
+            queue.runScheduledEmissions(row.label)
 
-        XCTAssertEqual(queue.pendingIds(), [RPCID(2)], "request 1 is answered, so it is no longer pending")
-        XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)])
+            XCTAssertEqual(queue.pendingIds(), [RPCID(2)], "\(row.label): request 1 is answered, so it is no longer pending")
+            XCTAssertEqual(queue.emitted, [RPCID(1), RPCID(2)], row.label)
+        }
     }
 
     func testAnsweringAnExpiredRequestShowsTheNextEvenIfTheErrorFailsToSend() async throws {
@@ -172,54 +186,6 @@ private final class OfflineNetworking: NetworkingInteractorMock {
     override func respondError(topic: String, requestId: RPCID, protocolMethod: ProtocolMethod, reason: Reason, envelopeType: Envelope.EnvelopeType) async throws {
         throw PublishFailed()
     }
-}
-
-/// A relay socket that takes every message and acknowledges none, as when the acknowledgement is lost.
-private final class SocketWithoutAcknowledgements: Dispatching {
-    var onMessage: ((String) -> Void)?
-    var isSocketConnected: Bool { true }
-    var networkConnectionStatusPublisher: AnyPublisher<NetworkConnectionStatus, Never> {
-        Just(.connected).eraseToAnyPublisher()
-    }
-    var socketConnectionStatusPublisher: AnyPublisher<SocketConnectionStatus, Never> {
-        Empty(completeImmediately: false).eraseToAnyPublisher()
-    }
-
-    func protectedSend(_ string: String, completion: @escaping (Error?) -> Void) {
-        completion(nil)
-    }
-
-    func protectedSend(_ string: String) async throws {}
-
-    func connect() throws {}
-
-    func disconnect(closeCode: URLSessionWebSocketTask.CloseCode) throws {}
-}
-
-/// Sends every message as is: what goes over the socket is not under test.
-private struct PlainSerializer: Serializing {
-    struct NotADecoder: Error {}
-
-    var logsPublisher: AnyPublisher<Log, Never> { Empty().eraseToAnyPublisher() }
-    var logger: ConsoleLogging { ConsoleLoggerMock() }
-
-    func setLogging(level: LoggingLevel) {}
-
-    func serialize(topic: String?, encodable: Encodable, envelopeType: Envelope.EnvelopeType, codingType: Envelope.CodingType) throws -> String {
-        "envelope"
-    }
-
-    func deserialize<T: Codable>(topic: String, codingType: Envelope.CodingType, envelopeString: String) throws -> (T, derivedTopic: String?, decryptedPayload: Data) {
-        throw NotADecoder()
-    }
-}
-
-/// Publishing never asks for the client id.
-private struct NoClientId: ClientIdStoring {
-    struct NotStored: Error {}
-
-    func getOrCreateKeyPair() throws -> SigningPrivateKey { throw NotStored() }
-    func getClientId() throws -> String { throw NotStored() }
 }
 
 /// One pending-request queue: an in-memory `RPCHistory`, its `HistoryService`, and a
@@ -315,22 +281,9 @@ private final class Queue {
     }
 
     /// The real networking and relay client on this queue's history, over a socket that never
-    /// acknowledges, so every publish times out: after a millisecond here, 60 s in an app.
+    /// acknowledges, so every publish times out.
     func makeNetworkingWhoseRelayNeverAcknowledges() -> NetworkingInteractor {
-        let relayClient = RelayClient(
-            dispatcher: SocketWithoutAcknowledgements(),
-            logger: ConsoleLoggerMock(),
-            rpcHistory: RPCHistoryFactory.createForRelay(keyValueStorage: RuntimeKeyValueStorage()),
-            clientIdStorage: NoClientId(),
-            subscriptionsTracker: SubscriptionsTrackerMock(),
-            acknowledgementTimeout: .milliseconds(1)
-        )
-        return NetworkingInteractor(
-            relayClient: relayClient,
-            serializer: PlainSerializer(),
-            logger: ConsoleLoggerMock(),
-            rpcHistory: rpcHistory
-        )
+        networkingWhoseRelayNeverAcknowledges(history: rpcHistory)
     }
 
     func makeResponder(networking: NetworkInteracting) -> SessionResponder {
