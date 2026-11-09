@@ -124,17 +124,18 @@ final class ApproveEngineTests: XCTestCase {
         let pairing = WCPairing.stub()
         let topicA = pairing.topic
         pairingStorageMock.setPairing(pairing)
-        var sessionProposed = false
         let proposerPubKey = AgreementPrivateKey().publicKey.hexRepresentation
         let proposal = SessionProposal.stub(proposerPubKey: proposerPubKey)
-
+        // With no verify context stored yet, the engine reports the proposal from a task, once the
+        // origin is verified, so the test waits for it rather than reading a flag right away.
+        let proposed = expectation(description: "the engine reports the proposal")
         engine.onSessionProposal = { _, _ in
-            sessionProposed = true
+            proposed.fulfill()
         }
 
         pairingRegisterer.subject.send(RequestSubscriptionPayload(id: RPCID("id"), topic: topicA, request: proposal, decryptedPayload: Data(), publishedAt: Date(), derivedTopic: nil, encryptedMessage: "", attestation: nil))
         XCTAssertNotNil(try! proposalPayloadsStore.get(key: proposal.proposer.publicKey), "Proposer must store proposal payload")
-        XCTAssertTrue(sessionProposed)
+        wait(for: [proposed], timeout: 5)
     }
 
     func testSessionSettle() async throws {
